@@ -248,8 +248,9 @@ class ConsistentHashingTest {
             }
 
             Map<String, String> consistentNewMappings = ring.getNodeMappings(keys);
+            final Map<String, String> prevMappingsSnapshot = consistentPrevMappings;
             long consistentRelocated = keys.stream()
-                    .filter(key -> !consistentPrevMappings.get(key).equals(consistentNewMappings.get(key)))
+                    .filter(key -> !prevMappingsSnapshot.get(key).equals(consistentNewMappings.get(key)))
                     .count();
             double consistentPercent = (consistentRelocated * 100.0) / keyCount;
 
