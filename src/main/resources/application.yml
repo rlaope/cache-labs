@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: reservation-cache
+
+  # H2 Database
+  datasource:
+    url: jdbc:h2:mem:reservationdb
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+  # Redis
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 3000ms
+
+  # Cache
+  cache:
+    type: caffeine
+
+# Custom Cache Settings
+cache:
+  local:
+    expire-seconds: 60
+    maximum-size: 1000
+  redis:
+    expire-seconds: 300
+
+logging:
+  level:
+    khope.cache: DEBUG
+    org.springframework.cache: DEBUG
