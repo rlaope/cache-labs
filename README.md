@@ -10,6 +10,8 @@
 2. [어떻게 구현할 것인가](#2-어떻게-구현할-것인가)
 3. [캐시 일관성을 어떻게 지킬 것인가](#3-캐시-일관성을-어떻게-지킬-것인가)
 4. [분산 환경에서의 캐시 설계](#4-분산-환경에서의-캐시-설계)
+5. [캐시 장애 대응 (Circuit Breaker)](#5-캐시-장애-대응-circuit-breaker)
+6. [캐시 모니터링 및 운영](#6-캐시-모니터링-및-운영)
 
 ---
 
@@ -563,5 +565,92 @@ session:abc123 → cache-server-1
 ```
 
 > 위 코드는 학습용 기본 구현임. 실제 프로덕션에서는 `ketama` 알고리즘을 구현한 라이브러리(예: SpyMemcached, Jedis의 ShardedJedis)를 쓰거나, Redis Cluster처럼 Hash Slot 방식을 쓰는 게 일반적임. 직접 구현하면 해시 함수 선택, 충돌 처리, Thread-safety 등 고려할 게 많아서 검증된 라이브러리 쓰는 게 안전함.
+
+---
+
+## 5. 캐시 장애 대응 (Circuit Breaker)
+
+> TBD
+
+### 5.1 Redis 장애 시 Graceful Degradation
+
+> TBD
+>
+> - Redis 연결 실패 시 L1(로컬 캐시)만으로 서비스 유지
+> - DB 직접 조회 fallback 전략
+> - 장애 감지 및 자동 복구
+
+### 5.2 Circuit Breaker 패턴
+
+> TBD
+>
+> - Closed → Open → Half-Open 상태 전이
+> - Resilience4j / Hystrix 연동
+> - Fallback 메서드 설계
+
+### 5.3 Timeout 및 Retry 전략
+
+> TBD
+>
+> - Redis 연결/명령 타임아웃 설정
+> - Retry with exponential backoff
+> - Bulkhead 패턴으로 자원 격리
+
+### 5.4 장애 시나리오별 대응
+
+> TBD
+>
+> - Redis 마스터 장애
+> - 네트워크 파티션
+> - 메모리 부족 (OOM)
+> - Slow Query로 인한 지연
+
+---
+
+## 6. 캐시 모니터링 및 운영
+
+> TBD
+
+### 6.1 핵심 메트릭
+
+> TBD
+>
+> - Hit Ratio (캐시 적중률)
+> - Latency (응답 시간 분포)
+> - Memory Usage (메모리 사용량)
+> - Eviction Rate (퇴출 비율)
+> - Connection Pool 상태
+
+### 6.2 Micrometer + Prometheus 연동
+
+> TBD
+>
+> - Spring Boot Actuator 설정
+> - 커스텀 메트릭 등록
+> - Prometheus 스크래핑 설정
+
+### 6.3 Grafana 대시보드 구성
+
+> TBD
+>
+> - 캐시 성능 대시보드 패널 구성
+> - Redis 클러스터 모니터링
+> - 알림 규칙 설정 (Hit Ratio 급락, Latency 급증 등)
+
+### 6.4 로그 및 트레이싱
+
+> TBD
+>
+> - 캐시 HIT/MISS 로깅 전략
+> - Slow Query 감지 및 알림
+> - 분산 트레이싱 (Zipkin/Jaeger) 연동
+
+### 6.5 운영 체크리스트
+
+> TBD
+>
+> - 배포 전 캐시 워밍업
+> - 롤백 시 캐시 무효화 계획
+> - 정기적인 메모리/성능 점검
 
 ---
