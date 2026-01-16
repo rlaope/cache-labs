@@ -258,6 +258,8 @@ class DistributedCacheSimulationTest {
     @Test
     @DisplayName("L1 캐시 불일치 시뮬레이션 - 서로 다른 L1 캐시 상태")
     void l1CacheInconsistency_simulation() {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given - 서로 다른 "노드"의 L1 캐시 상태 시뮬레이션
         String key = "reservation:inconsistency-test";
 
