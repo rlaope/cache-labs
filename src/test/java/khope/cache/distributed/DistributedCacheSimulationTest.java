@@ -17,6 +17,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * 분산 환경 시뮬레이션 테스트
@@ -24,6 +25,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * README 2.1 L1 + L2 이중 캐시 구조 테스트
  * - 여러 "노드"(스레드)가 동시에 캐시에 접근하는 상황 시뮬레이션
  * - L1(로컬) 캐시와 L2(Redis) 캐시의 동작 검증
+ *
+ * 주의: 이 테스트는 Redis가 필요합니다.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -40,15 +43,30 @@ class DistributedCacheSimulationTest {
     private RedisTemplate<String, Object> redisTemplate;
 
     private static final String CACHE_NAME = CacheConfig.RESERVATION_CACHE;
+    private boolean redisAvailable;
 
     @BeforeEach
     void setUp() {
-        cacheService.evictAll(CACHE_NAME);
+        redisAvailable = checkRedisAvailable();
+        if (redisAvailable) {
+            cacheService.evictAll(CACHE_NAME);
+        }
+    }
+
+    private boolean checkRedisAvailable() {
+        try {
+            redisTemplate.getConnectionFactory().getConnection().ping();
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @Test
     @DisplayName("L1 캐시 HIT 시 L2(Redis) 접근 없이 바로 반환")
     void l1CacheHit_shouldNotAccessL2() {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         String key = "reservation:1";
         Reservation reservation = createTestReservation(1L);
@@ -72,6 +90,8 @@ class DistributedCacheSimulationTest {
     @Test
     @DisplayName("L1 MISS, L2 HIT 시 L1에 복사 후 반환")
     void l1Miss_l2Hit_shouldCopyToL1() {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         String key = "reservation:2";
         Reservation reservation = createTestReservation(2L);
@@ -104,6 +124,8 @@ class DistributedCacheSimulationTest {
     @Test
     @DisplayName("L1, L2 모두 MISS 시 DB에서 조회 후 양쪽 캐시에 저장")
     void bothMiss_shouldLoadFromDbAndCacheBoth() {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         String key = "reservation:3";
         AtomicInteger dbCallCount = new AtomicInteger(0);
@@ -129,6 +151,8 @@ class DistributedCacheSimulationTest {
     @Test
     @DisplayName("여러 노드(스레드)가 동시에 동일 키 조회 시 DB 호출 최소화")
     void multipleNodes_concurrentAccess_shouldMinimizeDbCalls() throws Exception {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         String key = "reservation:hot-key";
         int nodeCount = 10;
@@ -195,6 +219,8 @@ class DistributedCacheSimulationTest {
     @Test
     @DisplayName("캐시 무효화 후 모든 노드가 최신 데이터 조회")
     void cacheInvalidation_allNodesShouldGetFreshData() throws Exception {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         String key = "reservation:invalidation-test";
         AtomicInteger version = new AtomicInteger(1);

@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Cache Stampede (Thundering Herd) 테스트
@@ -25,6 +26,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * README 3.3 Cache Stampede 방지 테스트
  * - 캐시 만료 시 동시 다발적 DB 접근 문제 시뮬레이션
  * - Jitter, Distributed Lock, PER 등의 해결책 검증
+ *
+ * 주의: 일부 테스트는 Redis가 필요합니다.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -38,15 +41,30 @@ class CacheStampedeTest {
     private RedisTemplate<String, Object> redisTemplate;
 
     private static final String CACHE_NAME = CacheConfig.RESERVATION_CACHE;
+    private boolean redisAvailable;
 
     @BeforeEach
     void setUp() {
-        cacheService.evictAll(CACHE_NAME);
+        redisAvailable = checkRedisAvailable();
+        if (redisAvailable) {
+            cacheService.evictAll(CACHE_NAME);
+        }
+    }
+
+    private boolean checkRedisAvailable() {
+        try {
+            redisTemplate.getConnectionFactory().getConnection().ping();
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @Test
     @DisplayName("캐시 만료 시 Stampede 현상 시뮬레이션 (문제 상황)")
     void cacheExpiry_stampede_problemSimulation() throws Exception {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         String key = "hot-product:12345";
         int concurrentRequests = 100;
@@ -114,6 +132,8 @@ class CacheStampedeTest {
     @Test
     @DisplayName("Distributed Lock을 사용한 Stampede 방지")
     void distributedLock_preventStampede() throws Exception {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         String key = "hot-product:lock-test";
         String lockKey = "lock:" + key;
@@ -198,6 +218,8 @@ class CacheStampedeTest {
     @Test
     @DisplayName("PER(Probabilistic Early Recomputation) 시뮬레이션")
     void probabilisticEarlyRecomputation_simulation() {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         String key = "per-test:product";
         long ttlSeconds = 300; // 5분
@@ -246,6 +268,8 @@ class CacheStampedeTest {
     @Test
     @DisplayName("Hot Key 시뮬레이션 - 특정 키에 트래픽 집중")
     void hotKey_trafficConcentration() throws Exception {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         String hotKey = "popular-product:black-friday";
         String[] normalKeys = {"product:1", "product:2", "product:3", "product:4", "product:5"};

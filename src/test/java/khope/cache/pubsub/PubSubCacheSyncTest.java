@@ -32,6 +32,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * README 3.4, 4.4 Pub/Sub을 활용한 캐시 동기화 테스트
  * - Redis Pub/Sub을 통한 L1 캐시 무효화 브로드캐스팅
  * - 여러 노드 간 캐시 일관성 유지
+ *
+ * 주의: 이 테스트는 Redis가 필요합니다. macOS ARM에서는 Embedded Redis가
+ * 지원되지 않으므로 로컬 Redis 서버가 실행 중이어야 합니다.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -52,11 +55,24 @@ class PubSubCacheSyncTest {
 
     private RedisMessageListenerContainer listenerContainer;
     private List<SimulatedNode> simulatedNodes;
+    private boolean redisAvailable;
 
     @BeforeEach
     void setUp() {
-        cacheService.evictAll(CACHE_NAME);
+        redisAvailable = checkRedisAvailable();
+        if (redisAvailable) {
+            cacheService.evictAll(CACHE_NAME);
+        }
         simulatedNodes = new ArrayList<>();
+    }
+
+    private boolean checkRedisAvailable() {
+        try {
+            redisTemplate.getConnectionFactory().getConnection().ping();
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @AfterEach
@@ -70,6 +86,8 @@ class PubSubCacheSyncTest {
     @Test
     @DisplayName("Pub/Sub을 통한 캐시 무효화 메시지 브로드캐스팅")
     void pubSubInvalidation_broadcastToAllNodes() throws Exception {
+        assumeTrue(redisAvailable, "Redis is not available - skipping Pub/Sub test");
+
         // Given - 3개의 노드 시뮬레이션
         int nodeCount = 3;
         String key = "reservation:pubsub-test";
@@ -113,6 +131,8 @@ class PubSubCacheSyncTest {
     @Test
     @DisplayName("데이터 업데이트 시 모든 노드의 L1 캐시 무효화")
     void dataUpdate_invalidateAllNodesL1Cache() throws Exception {
+        assumeTrue(redisAvailable, "Redis is not available - skipping Pub/Sub test");
+
         // Given
         int nodeCount = 4;
         String key = "reservation:update-test";
@@ -242,6 +262,8 @@ class PubSubCacheSyncTest {
     @Test
     @DisplayName("대량 캐시 무효화 시 Pub/Sub 성능")
     void bulkInvalidation_pubSubPerformance() throws Exception {
+        assumeTrue(redisAvailable, "Redis is not available - skipping Pub/Sub test");
+
         // Given
         int keyCount = 100;
         int nodeCount = 5;
