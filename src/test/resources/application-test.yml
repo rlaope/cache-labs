@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: cache-test
+
+  # H2 Database
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+
+  # Redis (Embedded)
+  data:
+    redis:
+      host: localhost
+      port: 6370
+      timeout: 1000ms
+
+  cache:
+    type: caffeine
+
+# Custom Cache Settings (테스트용 짧은 TTL)
+cache:
+  local:
+    expire-seconds: 10
+    maximum-size: 100
+  redis:
+    expire-seconds: 30
+
+logging:
+  level:
+    khope.cache: DEBUG
+    org.springframework.cache: DEBUG
