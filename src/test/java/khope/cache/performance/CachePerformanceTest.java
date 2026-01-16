@@ -311,6 +311,8 @@ class CachePerformanceTest {
     @Test
     @DisplayName("메모리 사용량 측정 (대량 캐시)")
     void memoryUsage_largeCacheSize() {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         int[] keyCounts = {100, 1000, 5000, 10000};
 
@@ -348,6 +350,8 @@ class CachePerformanceTest {
     @Test
     @DisplayName("읽기/쓰기 혼합 워크로드 성능")
     void mixedWorkload_readWritePerformance() throws Exception {
+        assumeTrue(redisAvailable, "Redis is not available - skipping test");
+
         // Given
         int totalOperations = 10000;
         double readRatio = 0.9; // 90% 읽기, 10% 쓰기
