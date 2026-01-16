@@ -4,6 +4,7 @@ import khope.cache.config.CacheConfig;
 import khope.cache.domain.Reservation;
 import khope.cache.service.TwoLevelCacheService;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.condition.DisabledIf;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.cache.CacheManager;
@@ -23,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Pub/Sub을 통한 캐시 동기화 테스트
