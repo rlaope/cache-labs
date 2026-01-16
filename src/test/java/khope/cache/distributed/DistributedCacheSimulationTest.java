@@ -214,7 +214,7 @@ class DistributedCacheSimulationTest {
         for (int i = 0; i < nodeCount; i++) {
             futures.add(executor.submit(() -> {
                 return cacheService.getOrLoad(CACHE_NAME, key, Reservation.class, () -> {
-                    return createTestReservation(version.get());
+                    return createTestReservation((long) version.get());
                 });
             }));
         }
