@@ -1,5 +1,6 @@
 package khope.cache.migration.dto;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -8,6 +9,10 @@ import lombok.NoArgsConstructor;
 /**
  * 유저 프로필 V2 (신버전)
  * 변경사항: name → username
+ *
+ * @JsonAlias로 V1 JSON(name 필드)도 V2 클래스로 역직렬화 가능
+ * - V1: {"name": "khope"} → username = "khope"
+ * - V2: {"username": "khope"} → username = "khope"
  */
 @Data
 @Builder
@@ -15,7 +20,8 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class UserProfileV2 {
 
-    private String username;    // v1의 name에서 변경됨
+    @JsonAlias("name")  // V1의 "name" 필드도 username으로 매핑
+    private String username;
     private String email;
     private Long points;
     private String bio;

@@ -7,7 +7,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.RedisConnectionFailureException;
+import org.springframework.data.redis.core.RedisOperations;
+import org.springframework.data.redis.core.SessionCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -17,6 +20,7 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -68,50 +72,87 @@ public class SchemaMigrationService {
 
     /**
      * 캐시에서 데이터를 읽고 Lazy Migration 적용
+     * WATCH/MULTI/EXEC를 사용한 Optimistic Locking으로 race condition 방지
+     * JSON 파싱은 애플리케이션 서버에서 처리 (Redis 이벤트 루프 보호)
      *
      * @param key Redis 키
      * @param type 변환할 타입
      * @return 마이그레이션된 데이터 (없으면 null)
      */
     public <T> T getWithMigration(String key, Class<T> type) {
-        try {
-            String json = stringRedisTemplate.opsForValue().get(key);
-            if (json == null) {
-                return null;
-            }
+        return getWithMigration(key, type, 3);  // 최대 3번 재시도
+    }
 
-            // JSON 파싱
-            JsonNode node = objectMapper.readTree(json);
-
-            // 버전 체크 및 마이그레이션
-            if (needsMigration(node)) {
-                log.debug("구버전 감지, Lazy Migration 시작 - key: {}", key);
-
-                JsonNode migrated = migrateToCurrentVersion(node);
-                String migratedJson = objectMapper.writeValueAsString(migrated);
-
-                // TTL 유지하면서 저장
-                Long ttl = stringRedisTemplate.getExpire(key, TimeUnit.SECONDS);
-                if (ttl != null && ttl > 0) {
-                    stringRedisTemplate.opsForValue().set(key, migratedJson, Duration.ofSeconds(ttl));
-                } else {
-                    stringRedisTemplate.opsForValue().set(key, migratedJson);
-                }
-
-                lazyMigrationCount.incrementAndGet();
-                log.info("Lazy Migration 완료 - key: {}, 총 마이그레이션: {}건",
-                        key, lazyMigrationCount.get());
-
-                return objectMapper.treeToValue(migrated, type);
-            }
-
-            alreadyMigratedCount.incrementAndGet();
-            return objectMapper.treeToValue(node, type);
-
-        } catch (JsonProcessingException e) {
-            log.error("JSON 파싱 실패 - key: {}", key, e);
+    @SuppressWarnings("unchecked")
+    private <T> T getWithMigration(String key, Class<T> type, int retryCount) {
+        if (retryCount <= 0) {
+            log.warn("마이그레이션 재시도 횟수 초과 - key: {}", key);
             migrationErrorCount.incrementAndGet();
             return null;
+        }
+
+        try {
+            return stringRedisTemplate.execute(new SessionCallback<T>() {
+                @Override
+                public T execute(RedisOperations operations) throws DataAccessException {
+                    try {
+                        operations.watch(key);
+
+                        String json = (String) operations.opsForValue().get(key);
+                        if (json == null) {
+                            operations.unwatch();
+                            return null;
+                        }
+
+                        // JSON 파싱은 Java에서 처리 (Redis 이벤트 루프 보호)
+                        JsonNode node = objectMapper.readTree(json);
+
+                        if (!needsMigration(node)) {
+                            operations.unwatch();
+                            alreadyMigratedCount.incrementAndGet();
+                            return objectMapper.treeToValue(node, type);
+                        }
+
+                        log.debug("구버전 감지, Lazy Migration 시작 - key: {}", key);
+
+                        JsonNode migrated = migrateToCurrentVersion(node);
+                        String migratedJson = objectMapper.writeValueAsString(migrated);
+
+                        // TTL 조회
+                        Long ttl = operations.getExpire(key, TimeUnit.SECONDS);
+
+                        // 트랜잭션 시작
+                        operations.multi();
+
+                        if (ttl != null && ttl > 0) {
+                            operations.opsForValue().set(key, migratedJson, Duration.ofSeconds(ttl));
+                        } else {
+                            operations.opsForValue().set(key, migratedJson);
+                        }
+
+                        List<Object> results = operations.exec();
+
+                        if (results == null || results.isEmpty()) {
+                            // 다른 스레드가 먼저 수정함 → 재시도
+                            log.debug("Optimistic lock 실패, 재시도 - key: {}", key);
+                            return getWithMigration(key, type, retryCount - 1);
+                        }
+
+                        lazyMigrationCount.incrementAndGet();
+                        log.info("Lazy Migration 완료 - key: {}, 총 마이그레이션: {}건",
+                                key, lazyMigrationCount.get());
+
+                        return objectMapper.treeToValue(migrated, type);
+
+                    } catch (JsonProcessingException e) {
+                        operations.unwatch();
+                        log.error("JSON 파싱 실패 - key: {}", key, e);
+                        migrationErrorCount.incrementAndGet();
+                        return null;
+                    }
+                }
+            });
+
         } catch (RedisConnectionFailureException e) {
             log.warn("Redis 연결 실패 - key: {}", key);
             return null;
