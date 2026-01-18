@@ -12,6 +12,7 @@
 4. [분산 환경에서의 캐시 설계](#4-분산-환경에서의-캐시-설계)
 5. [캐시 장애 대응 (Circuit Breaker)](#5-캐시-장애-대응-circuit-breaker)
 6. [캐시 모니터링 및 운영](#6-캐시-모니터링-및-운영)
+7. [실제 구현: 고트래픽 캐시 시스템](#7-실제-구현-고트래픽-캐시-시스템)
 
 ---
 
@@ -652,5 +653,426 @@ session:abc123 → cache-server-1
 > - 배포 전 캐시 워밍업
 > - 롤백 시 캐시 무효화 계획
 > - 정기적인 메모리/성능 점검
+
+---
+
+## 7. 실제 구현 (+캐시 마이그레이션)
+
+이 프로젝트는 앞서 정리한 캐시 이론을 바탕으로 **실제 고트래픽 환경에서 동작하는 캐시 시스템**을 구현한 것이다. 단순히 캐시를 적용하는 것을 넘어, 분산 환경에서의 일관성 유지, 동시성 제어, 무중단 스키마 마이그레이션까지 고려했다.
+
+### 7.1 전제 상황 및 제약 조건
+
+실제 운영 환경을 가정하고 다음과 같은 제약 조건을 설정했다.
+
+**트래픽 상황:**
+- 일 평균 1000만 요청, 피크 타임 10배 이상 증가
+- 읽기:쓰기 비율 = 9:1 (Read-heavy 워크로드)
+- 마이크로서비스 아키텍처, 서버 인스턴스 N대 운영
+
+**인프라 제약:**
+- Redis 메모리 사용량 80% (추가 할당 불가)
+- 캐시 히트율 70% 유지 중, 50% 이하 시 DB 장애 예상
+- Redis CPU 사용량 20% (여유 있음)
+
+**비즈니스 요구사항:**
+- 서비스 무중단 필수
+- 데이터 정합성 > 성능 (단, Strong Consistency까지는 불필요)
+- 스키마 변경이 주기적으로 발생 (name → username 같은 필드 변경)
+
+### 7.2 아키텍처 설계 결정
+
+#### 7.2.1 L1 + L2 이중 캐시 선택 이유
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Server A  │     │   Server B  │     │   Server C  │
+│ ┌─────────┐ │     │ ┌─────────┐ │     │ ┌─────────┐ │
+│ │L1 Cache │ │     │ │L1 Cache │ │     │ │L1 Cache │ │
+│ │(Caffeine)│ │     │ │(Caffeine)│ │     │ │(Caffeine)│ │
+│ └────┬────┘ │     │ └────┬────┘ │     │ └────┬────┘ │
+└──────┼──────┘     └──────┼──────┘     └──────┼──────┘
+       │                   │                   │
+       └───────────────────┼───────────────────┘
+                           │
+                    ┌──────▼──────┐
+                    │  L2 Cache   │
+                    │   (Redis)   │
+                    └──────┬──────┘
+                           │
+                    ┌──────▼──────┐
+                    │  Database   │
+                    └─────────────┘
+```
+
+**고민 1: "왜 Redis만 쓰면 안 되나?"**
+
+Redis만 사용하면 매 요청마다 네트워크 I/O가 발생한다. 초당 수만 건의 요청이 들어오면:
+- 네트워크 왕복 시간(RTT) 누적으로 지연 증가
+- Redis 단일 노드의 CPU 병목 가능성
+- Redis 장애 시 전체 서비스 영향
+
+L1(Caffeine)을 앞에 두면:
+- Hot data는 네트워크 비용 0으로 응답 (평균 응답시간 10배 이상 감소)
+- Redis 부하 분산
+- Redis 순단 시에도 L1 데이터로 버틸 수 있음
+
+**고민 2: "L1 캐시 간 데이터 불일치는?"**
+
+이 문제가 L1-L2 구조의 핵심 과제다. 해결책으로 **Redis Pub/Sub 기반 캐시 무효화**를 선택했다.
+
+```java
+// 데이터 변경 시 모든 서버의 L1 캐시를 무효화
+@Service
+public class CacheMessagePublisher {
+    public void publishInvalidation(String cacheName, String key) {
+        CacheMessage message = new CacheMessage(cacheName, key, "EVICT");
+        redisTemplate.convertAndSend("cache-invalidation", message);
+    }
+}
+
+// 각 서버가 메시지를 받아 자신의 L1 캐시를 삭제
+@Component
+public class CacheMessageSubscriber {
+    public void onMessage(CacheMessage message) {
+        Cache cache = cacheManager.getCache(message.cacheName());
+        if (cache != null) {
+            cache.evict(message.key());
+        }
+    }
+}
+```
+
+> Pub/Sub은 메시지 유실 가능성이 있어서, L1 TTL을 L2보다 훨씬 짧게 (10~60초) 설정해 자연스럽게 동기화되도록 보완했다.
+
+#### 7.2.2 캐시 유형별 분리
+
+모든 데이터를 동일하게 캐싱하면 효율이 떨어진다. 데이터 특성에 따라 전략을 분리했다.
+
+```java
+@Configuration
+public class CacheConfig {
+    @Bean
+    public CaffeineCacheManager cacheManager() {
+        CaffeineCacheManager manager = new CaffeineCacheManager();
+        manager.registerCustomCache("staticCache",
+            Caffeine.newBuilder()
+                .expireAfterWrite(1, TimeUnit.HOURS)  // 긴 TTL
+                .maximumSize(1000)
+                .build());
+
+        manager.registerCustomCache("userCache",
+            Caffeine.newBuilder()
+                .expireAfterWrite(1, TimeUnit.MINUTES)  // 짧은 TTL
+                .maximumSize(10000)
+                .build());
+        return manager;
+    }
+}
+```
+
+| 캐시 유형 | 대상 데이터 | L1 TTL | L2 TTL | 이유 |
+|----------|------------|--------|--------|------|
+| staticCache | 카테고리, 설정값, 코드 테이블 | 1시간 | 24시간 | 거의 안 바뀜, 전역 공유 |
+| userCache | 사용자 프로필, 세션 | 1분 | 10분 | 자주 변경, 정합성 중요 |
+
+#### 7.2.3 Write-Behind로 DB 부하 분산
+
+피크 타임에 대량의 쓰기 요청이 들어오면 DB가 병목이 된다. Write-Behind 패턴으로 쓰기를 버퍼링했다.
+
+```
+[쓰기 요청] → [Redis에 즉시 저장] → [Pending Queue에 추가]
+                                           ↓
+                                    [5초마다 배치로 DB 반영]
+```
+
+**고민: "Redis 장애 시 데이터 유실 위험은?"**
+
+맞다. Write-Behind는 데이터 유실 위험이 있다. 그래서:
+- **결제, 주문 같은 중요 데이터는 Write-Through** (DB 먼저 저장)
+- **프로필 수정, 설정 변경 같은 덜 중요한 데이터만 Write-Behind** 적용
+- Pending Queue를 Redis List로 관리해 서버 재시작 시에도 유지
+
+```java
+@Scheduled(fixedDelay = 5000)
+public void flushPendingUpdates() {
+    List<String> pendingKeys = redisTemplate.opsForList()
+        .range(PENDING_KEY, 0, BATCH_SIZE - 1);
+
+    for (String key : pendingKeys) {
+        String data = redisTemplate.opsForValue().get(key);
+        userProfileRepository.save(parseUserProfile(data));
+        redisTemplate.opsForList().remove(PENDING_KEY, 1, key);
+    }
+}
+```
+
+#### 7.2.4 분산 락으로 동시성 제어
+
+여러 서버에서 동시에 같은 데이터를 수정하면 Race Condition이 발생한다.
+
+```
+Server A: read(balance=100) → balance+50 → write(150)
+Server B: read(balance=100) → balance-30 → write(70)  // A의 변경 덮어씀!
+```
+
+Redisson 분산 락으로 해결:
+
+```java
+public UserProfile updateWithLock(Long userId, UserProfile update) {
+    RLock lock = redissonClient.getLock("user-lock:" + userId);
+    try {
+        // 최대 10초 대기, 락 획득 후 5초간 유지
+        if (lock.tryLock(10, 5, TimeUnit.SECONDS)) {
+            // 동시에 하나의 요청만 실행
+            return doUpdate(userId, update);
+        }
+        throw new ConcurrentModificationException("락 획득 실패");
+    } finally {
+        if (lock.isHeldByCurrentThread()) {
+            lock.unlock();
+        }
+    }
+}
+```
+
+**추가: 멱등성 키로 중복 요청 방지**
+
+네트워크 재시도로 같은 요청이 여러 번 올 수 있다. Redis SETNX로 멱등성 보장:
+
+```java
+public boolean checkIdempotency(String idempotencyKey) {
+    Boolean isNew = redisTemplate.opsForValue()
+        .setIfAbsent(IDEMPOTENCY_PREFIX + idempotencyKey, "1",
+                     Duration.ofMinutes(10));
+    return Boolean.TRUE.equals(isNew);  // 첫 요청만 true
+}
+```
+
+### 7.3 무중단 스키마 마이그레이션
+
+가장 까다로웠던 부분이다. 캐시된 JSON 구조가 바뀌면 (예: `name` → `username`) 어떻게 무중단으로 마이그레이션할 것인가?
+
+#### 7.3.1 문제 상황
+
+```json
+// 구버전 (V1)
+{"id": 1, "name": "홍길동", "email": "hong@test.com"}
+
+// 신버전 (V2)
+{"id": 1, "username": "홍길동", "email": "hong@test.com"}
+```
+
+**단순한 접근의 문제점:**
+
+| 방법 | 문제점 |
+|------|--------|
+| 캐시 전체 Flush | 히트율 급락 → DB 과부하 → 장애 |
+| TTL 만료 대기 | 마이그레이션 기간이 너무 김 (수 시간~일) |
+| 키 버전 변경 (v1→v2) | 메모리 80%인데 2배 필요 (V1+V2 공존) |
+
+#### 7.3.2 선택한 전략: Lazy Migration + Background Migration
+
+**전제 조건 분석:**
+- 메모리 80%: 추가 할당 불가 → 버전 키 방식 불가
+- 히트율 70%: 50% 이하 시 장애 → Flush 불가
+- CPU 20%: **여유 있음 → 활용 가능!**
+
+**해결책: 두 가지 마이그레이션 병행**
+
+```
+1. Lazy Migration: 읽을 때 변환 (히트율 유지)
+2. Background Migration: Redis CPU 여유분으로 선제 변환 (마이그레이션 가속)
+```
+
+**Lazy Migration (읽기 시점 변환):**
+
+```java
+public <T> T getWithMigration(String key, Class<T> targetType) {
+    String json = redisTemplate.opsForValue().get(key);
+    if (json == null) return null;
+
+    // V2 형식인지 확인
+    if (json.contains("\"username\"")) {
+        return objectMapper.readValue(json, targetType);
+    }
+
+    // V1 → V2 변환
+    JsonNode node = objectMapper.readTree(json);
+    if (node.has("name")) {
+        ((ObjectNode) node).set("username", node.get("name"));
+        ((ObjectNode) node).remove("name");
+
+        // 변환된 데이터를 다시 저장 (TTL 유지)
+        Long ttl = redisTemplate.getExpire(key, TimeUnit.SECONDS);
+        String newJson = objectMapper.writeValueAsString(node);
+        redisTemplate.opsForValue().set(key, newJson, ttl, TimeUnit.SECONDS);
+    }
+
+    return objectMapper.readValue(node.toString(), targetType);
+}
+```
+
+> Lazy Migration의 장점: 실제로 사용되는 데이터만 마이그레이션하므로 히트율에 영향이 없다. 캐시 Miss가 아니라 Hit 후 변환이니까.
+
+**Background Migration (Lua 스크립트로 서버 사이드 처리):**
+
+CPU 20%밖에 안 쓰고 있으니, 백그라운드에서 선제적으로 마이그레이션해서 기간을 단축한다.
+
+```lua
+-- migrate_user.lua (Redis 서버에서 실행)
+local key = KEYS[1]
+local data = redis.call('GET', key)
+if not data then return -1 end
+
+local obj = cjson.decode(data)
+if obj['username'] ~= nil then return 0 end  -- 이미 V2
+
+if obj['name'] ~= nil then
+    obj['username'] = obj['name']
+    obj['name'] = nil
+
+    local ttl = redis.call('TTL', key)
+    local newData = cjson.encode(obj)
+    if ttl > 0 then
+        redis.call('SETEX', key, ttl, newData)
+    else
+        redis.call('SET', key, newData)
+    end
+    return 1  -- 마이그레이션 성공
+end
+return 0
+```
+
+**왜 Lua 스크립트인가?**
+- 네트워크 왕복 1회로 읽기+변환+쓰기 원자적 실행
+- Redis 서버에서 처리하므로 클라이언트 부하 없음
+- MULTI/EXEC보다 효율적
+
+**CPU 기반 적응형 배치 크기:**
+
+```java
+@Scheduled(fixedDelay = 10000)
+public void migrateInBackground() {
+    double cpuUsage = getRedisCpuUsage();
+
+    // CPU 사용량에 따라 배치 크기 동적 조절
+    int batchSize;
+    if (cpuUsage > 70) batchSize = 0;       // 중단
+    else if (cpuUsage > 60) batchSize = 50;  // 최소
+    else if (cpuUsage > 40) batchSize = 100; // 보통
+    else if (cpuUsage > 20) batchSize = 300; // 여유
+    else batchSize = 500;                    // 매우 여유
+
+    if (batchSize > 0) {
+        scanAndMigrate(batchSize);
+    }
+}
+```
+
+#### 7.3.3 마이크로서비스 환경에서의 배포 전략
+
+마이크로서비스가 N개일 때, 모든 서비스에 하위호환 코드를 배포해야 한다.
+
+**권장: 공통 라이브러리로 분리**
+
+```
+cache-migration-lib/
+├── SchemaMigrationService.java
+├── MigrationStrategy.java (인터페이스)
+├── LuaScriptExecutor.java
+└── resources/scripts/
+```
+
+```java
+// 각 서비스에서 구현
+public class UserMigrationStrategy implements MigrationStrategy<UserProfile> {
+    @Override
+    public String getCacheKeyPattern() { return "user:*"; }
+
+    @Override
+    public UserProfile migrate(String rawJson) {
+        // V1 → V2 변환 로직
+    }
+}
+```
+
+**배포 순서 (필수):**
+
+```
+Phase 1: 하위호환 코드 배포 (모든 서버)
+         ↓
+         V1, V2 둘 다 읽을 수 있는 상태
+         ↓
+Phase 2: DB 스키마 변경
+         ↓
+Phase 3: 새 데이터는 V2로 저장
+         ↓
+Phase 4: 백그라운드 마이그레이션 완료 확인
+         ↓
+Phase 5: V1 호환 코드 제거 (기술 부채 정리)
+```
+
+> 핵심: **하위호환 코드가 먼저 배포되어야 한다.** 롤링 배포 중에 V2 코드 서버가 V1 데이터를 읽지 못하면 장애가 발생한다.
+
+### 7.4 구현 파일 구조
+
+```
+src/main/java/khope/cache/
+├── config/
+│   ├── CacheConfig.java          # L1 캐시 (Caffeine) 설정
+│   └── RedisConfig.java          # L2 캐시 (Redis) + Pub/Sub 설정
+├── service/
+│   ├── UserCacheService.java     # Write-Behind 캐시 서비스
+│   └── ConcurrentUserCacheService.java  # 분산 락 + 멱등성
+├── migration/
+│   ├── SchemaMigrationService.java      # Lazy Migration
+│   ├── BackgroundMigrationWorker.java   # Background Migration
+│   └── dto/
+│       ├── UserProfileV1.java
+│       └── UserProfileV2.java
+├── pubsub/
+│   ├── CacheMessage.java
+│   ├── CacheMessagePublisher.java
+│   └── CacheMessageSubscriber.java
+└── worker/
+    └── WriteBehindWorker.java    # DB 배치 반영
+
+src/main/resources/
+└── scripts/
+    └── migrate_user.lua          # 서버 사이드 마이그레이션 스크립트
+
+docker/
+├── docker-compose.yml            # Redis 컨테이너
+└── redis/
+    └── redis.conf                # 캐시 최적화 설정
+```
+
+### 7.5 로컬 테스트 환경
+
+```bash
+# Redis 시작
+docker compose up -d
+
+# 모니터링 대시보드 포함 시작
+docker compose --profile monitoring up -d
+
+# 테스트 실행
+./gradlew test --tests "khope.cache.migration.*"
+
+# Redis 상태 확인
+docker exec cache-redis redis-cli info memory
+docker exec cache-redis redis-cli info cpu
+```
+
+### 7.6 핵심 설계 원칙 정리
+
+| 고민 | 결정 | 이유 |
+|------|------|------|
+| Redis만 vs L1+L2 | L1+L2 이중 캐시 | Hot data 네트워크 비용 제거, Redis 장애 대응 |
+| 캐시 갱신 vs 삭제 | 삭제 (Evict) | Race Condition 방지 |
+| L1 동기화 | Redis Pub/Sub + 짧은 TTL | 메시지 유실 대비 |
+| 쓰기 전략 | 중요도별 분리 (Write-Through/Behind) | 성능과 안정성 트레이드오프 |
+| 스키마 마이그레이션 | Lazy + Background 병행 | 히트율 유지 + 마이그레이션 가속 |
+| 동시성 제어 | Redisson 분산 락 + 멱등성 키 | 데이터 정합성 보장 |
 
 ---
