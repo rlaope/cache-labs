@@ -173,4 +173,86 @@ class UserProfileCacheServiceTest {
         assertThat(afterJson).contains("\"username\"");
         assertThat(afterJson).doesNotContain("\"name\"");
     }
+
+    @Test
+    @Order(5)
+    @DisplayName("V1 JSON에 없는 새 필드는 기본값으로 채워짐")
+    void testNewFieldsGetDefaultValues() throws Exception {
+        assumeTrue(redisAvailable, "Redis 연결 필요");
+
+        // Given: V1 JSON (premiumLevel, notificationEnabled 필드 없음)
+        String v1Json = """
+            {
+                "name": "old-user",
+                "email": "old@test.com",
+                "points": 500
+            }
+            """;
+        stringRedisTemplate.opsForValue().set("user:profile:" + TEST_USER_ID, v1Json, Duration.ofMinutes(5));
+
+        System.out.println("=== V1 JSON (새 필드 없음) ===");
+        System.out.println(v1Json);
+
+        // When
+        Optional<UserProfileV2> result = cacheService.get(TEST_USER_ID);
+
+        // Then: 새 필드들은 기본값으로 채워짐
+        System.out.println("\n=== V2로 역직렬화 결과 ===");
+        assertThat(result).isPresent();
+        UserProfileV2 profile = result.get();
+
+        System.out.println("username: " + profile.getUsername());
+        System.out.println("premiumLevel: " + profile.getPremiumLevel() + " (기본값 0)");
+        System.out.println("notificationEnabled: " + profile.getNotificationEnabled() + " (기본값 true)");
+        System.out.println("lastLoginAt: " + profile.getLastLoginAt() + " (null 허용)");
+
+        // 기존 필드
+        assertThat(profile.getUsername()).isEqualTo("old-user");
+        assertThat(profile.getPoints()).isEqualTo(500L);
+
+        // 새 필드 - 기본값 확인
+        assertThat(profile.getPremiumLevel()).isEqualTo(0);  // 기본값
+        assertThat(profile.getNotificationEnabled()).isTrue();  // 기본값
+        assertThat(profile.getLastLoginAt()).isNull();  // null 허용
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("V2 JSON의 새 필드값은 그대로 유지")
+    void testV2FieldsPreserved() throws Exception {
+        assumeTrue(redisAvailable, "Redis 연결 필요");
+
+        // Given: V2 JSON (모든 필드 있음)
+        String v2Json = """
+            {
+                "username": "premium-user",
+                "email": "premium@test.com",
+                "points": 9999,
+                "premiumLevel": 3,
+                "notificationEnabled": false,
+                "lastLoginAt": 1705555200000
+            }
+            """;
+        stringRedisTemplate.opsForValue().set("user:profile:" + TEST_USER_ID, v2Json, Duration.ofMinutes(5));
+
+        System.out.println("=== V2 JSON (모든 필드 있음) ===");
+        System.out.println(v2Json);
+
+        // When
+        Optional<UserProfileV2> result = cacheService.get(TEST_USER_ID);
+
+        // Then: 모든 값 그대로 유지
+        System.out.println("\n=== V2로 역직렬화 결과 ===");
+        assertThat(result).isPresent();
+        UserProfileV2 profile = result.get();
+
+        System.out.println("username: " + profile.getUsername());
+        System.out.println("premiumLevel: " + profile.getPremiumLevel());
+        System.out.println("notificationEnabled: " + profile.getNotificationEnabled());
+        System.out.println("lastLoginAt: " + profile.getLastLoginAt());
+
+        assertThat(profile.getPremiumLevel()).isEqualTo(3);  // 기본값 아님
+        assertThat(profile.getNotificationEnabled()).isFalse();  // 기본값 아님
+        assertThat(profile.getLastLoginAt()).isEqualTo(1705555200000L);
+    }
 }
