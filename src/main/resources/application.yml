@@ -63,6 +63,14 @@ cache:
   write-behind:
     pending-key: pending-db-updates
     batch-delay-ms: 5000        # 5초마다 DB 일괄 업데이트
+  # 스키마 마이그레이션 설정
+  migration:
+    background:
+      enabled: true               # 백그라운드 마이그레이션 활성화
+      key-pattern: "user:*"       # 마이그레이션 대상 키 패턴
+      batch-size: 500             # 기본 배치 크기
+      interval-ms: 10000          # 실행 간격 (10초)
+      cpu-limit: 60               # CPU 사용량 제한 (%)
 
 logging:
   level:
