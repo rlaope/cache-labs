@@ -19,11 +19,11 @@ spring:
       ddl-auto: create-drop
     show-sql: false
 
-  # Redis (Embedded)
+  # Redis (Docker)
   data:
     redis:
       host: localhost
-      port: 6370
+      port: 6379
       timeout: 1000ms
 
   cache:
