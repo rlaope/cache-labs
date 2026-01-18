@@ -31,11 +31,27 @@ spring:
 
 # Custom Cache Settings (테스트용 짧은 TTL)
 cache:
+  static:
+    local:
+      expire-seconds: 10
+      maximum-size: 100
+    redis:
+      expire-seconds: 30
+  user:
+    local:
+      expire-seconds: 5
+      maximum-size: 1000
+    redis:
+      expire-seconds: 20
   local:
     expire-seconds: 10
     maximum-size: 100
   redis:
     expire-seconds: 30
+  invalidation-topic: cache-invalidation
+  write-behind:
+    pending-key: pending-db-updates
+    batch-delay-ms: 5000
 
 logging:
   level:

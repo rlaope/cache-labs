@@ -35,11 +35,34 @@ spring:
 
 # Custom Cache Settings
 cache:
+  # Static Data 캐시 - 전역 데이터 (공지사항, 카테고리 등)
+  static:
+    local:
+      expire-seconds: 3600      # 1시간 (변경이 드문 데이터)
+      maximum-size: 500
+    redis:
+      expire-seconds: 7200      # 2시간
+  # User Data 캐시 - 유저별 고유 데이터
+  user:
+    local:
+      expire-seconds: 60        # 1분 (짧은 TTL)
+      maximum-size: 10000
+    redis:
+      expire-seconds: 300       # 5분
+  # 기존 설정 (하위 호환)
   local:
     expire-seconds: 60
     maximum-size: 1000
   redis:
     expire-seconds: 300
+  # Pub/Sub 설정
+  pubsub:
+    enabled: true                   # 프로덕션에서 Pub/Sub 활성화
+  invalidation-topic: cache-invalidation
+  # Write-Behind 설정
+  write-behind:
+    pending-key: pending-db-updates
+    batch-delay-ms: 5000        # 5초마다 DB 일괄 업데이트
 
 logging:
   level:

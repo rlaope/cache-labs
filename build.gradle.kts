@@ -29,6 +29,9 @@ dependencies {
     // Redis
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
 
+    // Redisson (분산 락)
+    implementation("org.redisson:redisson-spring-boot-starter:3.24.3")
+
     // Local Cache (Caffeine)
     implementation("org.springframework.boot:spring-boot-starter-cache")
     implementation("com.github.ben-manes.caffeine:caffeine:3.1.8")
